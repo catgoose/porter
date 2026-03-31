@@ -10,19 +10,35 @@ provider (like [crooner](https://github.com/catgoose/crooner)).
 go get github.com/catgoose/porter
 ```
 
-## CSRF Protection
-
-Porter ships a session-backed CSRF middleware. Any session store that satisfies
-`CSRFSessionStore` can hold the token -- crooner's `SessionManager`, a
-cookie-based store, or your own implementation.
-
-### Using the built-in cookie store
+## Quick start
 
 ```go
-e := echo.New()
+package main
 
-e.Use(porter.CSRF(porter.CookieCSRFStore{}, porter.CSRFConfig{}))
+import (
+    "github.com/catgoose/porter"
+    "github.com/labstack/echo/v4"
+)
+
+func main() {
+    e := echo.New()
+
+    // CSRF protection with cookie-based token store
+    e.Use(porter.CSRF(porter.CookieCSRFStore{}, porter.CSRFConfig{}))
+
+    // Session settings (requires a SessionSettingsProvider implementation)
+    e.Use(porter.SessionSettingsMiddleware(repo, nil))
+
+    e.Logger.Fatal(e.Start(":8080"))
+}
 ```
+
+## CSRF protection
+
+The `CSRF` function returns Echo middleware that generates tokens on safe methods
+(GET, HEAD, OPTIONS, TRACE) and validates them on unsafe methods (POST, PUT,
+DELETE, PATCH). Tokens are read from the `X-CSRF-Token` header first, then the
+`_csrf` form value.
 
 ### Configuration
 
@@ -38,6 +54,14 @@ e.Use(porter.CSRF(store, porter.CSRFConfig{
     RotatePerRequest: false,
 }))
 ```
+
+### CSRFConfig
+
+| Field              | Type       | Description                                                                 |
+|--------------------|------------|-----------------------------------------------------------------------------|
+| `ExemptPaths`      | `[]string` | Paths that skip CSRF validation entirely. Prefix matching is applied.       |
+| `PerRequestPaths`  | `[]string` | Paths that get a fresh token on every safe request (exact match).           |
+| `RotatePerRequest` | `bool`     | When true, rotate the token on every safe request regardless of path.       |
 
 ### Reading the token in templates
 
@@ -61,10 +85,38 @@ In your form:
 </form>
 ```
 
-The middleware accepts the token from an `X-CSRF-Token` header or a `_csrf`
-form value.
+### CSRFSessionStore interface
 
-## Session Settings
+Any session backend that implements `Get` and `Set` can be used as the CSRF
+token store:
+
+```go
+type CSRFSessionStore interface {
+    Get(c echo.Context, key string) (any, error)
+    Set(c echo.Context, key string, value any) error
+}
+```
+
+This is compatible with crooner's session manager out of the box. Crooner's
+`SessionManager` has the same `Get` and `Set` signatures, so any crooner
+session manager (`*SCSManager`, custom implementations, etc.) satisfies
+`CSRFSessionStore` directly -- no wrapper needed.
+
+### CookieCSRFStore
+
+For apps that do not have a server-side session store, `CookieCSRFStore` stores
+the CSRF token in an `HttpOnly` cookie named `_csrf`:
+
+```go
+e.Use(porter.CSRF(porter.CookieCSRFStore{}, porter.CSRFConfig{}))
+```
+
+### Nil store
+
+When the session store is nil, the CSRF middleware is a no-op. This is useful
+for conditionally disabling CSRF in development or testing.
+
+## Session settings
 
 Porter provides per-session user preferences (theme, layout, etc.) backed by
 a `SessionSettingsProvider` repository.
@@ -91,27 +143,62 @@ e.GET("/dashboard", func(c echo.Context) error {
 })
 ```
 
-## With Crooner
+### SessionConfig
+
+Optional configuration passed as a variadic argument to
+`SessionSettingsMiddleware`:
+
+| Field        | Type           | Default                | Description                        |
+|--------------|----------------|------------------------|------------------------------------|
+| `CookieName` | `string`      | `"porter_session_id"` | Name of the fallback session cookie. |
+| `Logger`     | `*slog.Logger` | `slog.Default()`      | Logger for error reporting.        |
+
+### SessionSettings
+
+The `SessionSettings` struct holds the persisted preferences:
+
+| Field         | Type        | Description                       |
+|---------------|-------------|-----------------------------------|
+| `SessionUUID` | `string`    | The session identifier.           |
+| `Theme`       | `string`    | UI theme (default `"light"`).     |
+| `Layout`      | `string`    | UI layout (default `"classic"`).  |
+| `UpdatedAt`   | `time.Time` | Last update timestamp.            |
+| `ID`          | `int`       | Database row ID.                  |
+
+### SessionSettingsProvider interface
+
+Implement this interface to back session settings with your storage layer
+(SQL, Redis, in-memory, etc.):
+
+```go
+type SessionSettingsProvider interface {
+    GetByUUID(ctx context.Context, uuid string) (*SessionSettings, error)
+    Upsert(ctx context.Context, s *SessionSettings) error
+    Touch(ctx context.Context, uuid string) error
+}
+```
+
+### Constants
+
+```go
+const (
+    DefaultTheme  = "light"
+    DefaultLayout = "classic"
+    LayoutApp     = "app"
+)
+```
+
+`NewDefaultSettings(uuid)` returns a `*SessionSettings` populated with these
+defaults.
+
+## With crooner
 
 [Crooner](https://github.com/catgoose/crooner) handles authentication (OIDC,
 OAuth2, session management). Porter layers on top for CSRF, session settings,
 and authorization. The two libraries share the same interface conventions, so
 wiring them together requires no adapters or glue code.
 
-### Crooner's SessionManager satisfies CSRFSessionStore
-
-Porter's CSRF middleware needs a `CSRFSessionStore`:
-
-```go
-type CSRFSessionStore interface {
-    Get(c echo.Context, key string) (any, error)
-    Set(c echo.Context, key string, value any) error
-}
-```
-
-Crooner's `SessionManager` interface has the same `Get` and `Set` signatures,
-so any crooner session manager (`*SCSManager`, custom implementations, etc.)
-satisfies `CSRFSessionStore` directly -- no wrapper needed:
+### CSRF with crooner's session manager
 
 ```go
 sm, scsMgr, err := crooner.NewSCSManager(
@@ -129,10 +216,6 @@ e.Use(porter.CSRF(sm, porter.CSRFConfig{
 }))
 ```
 
-Both crooner and porter use the same session key (`"csrf_token"`) for the
-token, so tokens created by crooner's callback handler are validated by
-porter's CSRF middleware without any extra configuration.
-
 ### Session settings with crooner's session ID
 
 Porter's `SessionSettingsMiddleware` accepts an optional `SessionIDFunc` that
@@ -141,7 +224,6 @@ sessions, read the SCS token from the request so that session settings are
 tied to the authenticated session rather than a separate cookie:
 
 ```go
-// Read the session token that SCS set on the request.
 e.Use(porter.SessionSettingsMiddleware(repo, func(c echo.Context) string {
     cookie, err := c.Cookie(sm.GetCookieName())
     if err != nil || cookie.Value == "" {
@@ -155,166 +237,7 @@ When the function returns an empty string (no session cookie yet), porter
 automatically falls back to a random cookie-based session ID, so
 unauthenticated visitors still get session settings.
 
-### Bridging crooner's user info into porter's Identity
-
-Crooner stores the authenticated user in the session under the `"user"` key
-(and optionally additional claims via `SessionValueClaims`). Porter's
-authorization middleware expects an `IdentityProvider` that returns a
-`porter.Identity`.
-
-Use `ContextIdentityProvider` with a small middleware that reads from
-crooner's session and sets the identity on the context:
-
-```go
-// CroonerIdentityMiddleware reads the user and roles from crooner's session
-// and sets a porter.Identity on the echo context.
-func CroonerIdentityMiddleware(sm crooner.SessionManager) echo.MiddlewareFunc {
-    return func(next echo.HandlerFunc) echo.HandlerFunc {
-        return func(c echo.Context) error {
-            user, err := crooner.GetString(sm, c, crooner.SessionKeyUser)
-            if err != nil || user == "" {
-                return next(c) // no session user -- skip
-            }
-
-            // Read roles if stored via SessionValueClaims (e.g. "roles" claim).
-            var roles []string
-            if val, err := sm.Get(c, "roles"); err == nil {
-                if r, ok := val.([]string); ok {
-                    roles = r
-                }
-            }
-
-            c.Set("porter.user_identity", porter.SimpleIdentity{
-                ID:       user,
-                RoleList: roles,
-            })
-            return next(c)
-        }
-    }
-}
-```
-
-Then wire porter's authorization middleware with `ContextIdentityProvider`
-pointing at the same context key:
-
-```go
-idProvider := porter.ContextIdentityProvider{
-    ContextKey: "porter.user_identity",
-}
-
-// Protect all /admin routes -- requires authentication + "admin" role.
-admin := e.Group("/admin",
-    porter.RequireRole(idProvider, "admin"),
-)
-```
-
-### Complete wiring example
-
-```go
-package main
-
-import (
-    "log"
-    "time"
-
-    "github.com/catgoose/crooner"
-    "github.com/catgoose/porter"
-    "github.com/labstack/echo/v4"
-)
-
-func main() {
-    e := echo.New()
-
-    // -- crooner: session + OIDC auth --
-
-    sm, scsMgr, err := crooner.NewSCSManager(
-        crooner.WithPersistentCookieName("secret", "myapp"),
-        crooner.WithLifetime(12 * time.Hour),
-    )
-    if err != nil {
-        log.Fatal(err)
-    }
-    e.Use(echo.WrapMiddleware(scsMgr.LoadAndSave))
-
-    // crooner.NewAuthConfig sets up /login, /callback, /logout and
-    // the RequireAuth middleware that redirects unauthenticated users.
-    // See crooner's README for full AuthConfigParams.
-
-    // -- porter: CSRF --
-
-    // sm satisfies porter.CSRFSessionStore directly.
-    e.Use(porter.CSRF(sm, porter.CSRFConfig{
-        ExemptPaths: []string{"/login", "/callback", "/logout"},
-    }))
-
-    // -- porter: session settings --
-
-    // repo implements porter.SessionSettingsProvider (backed by your DB).
-    var repo porter.SessionSettingsProvider
-    e.Use(porter.SessionSettingsMiddleware(repo, func(c echo.Context) string {
-        cookie, err := c.Cookie(sm.GetCookieName())
-        if err != nil || cookie.Value == "" {
-            return ""
-        }
-        return cookie.Value
-    }))
-
-    // -- porter: authorization --
-
-    // Bridge crooner's session user into porter's Identity.
-    e.Use(CroonerIdentityMiddleware(sm))
-
-    idProvider := porter.ContextIdentityProvider{
-        ContextKey: "porter.user_identity",
-    }
-
-    // Public routes.
-    e.GET("/", homeHandler)
-
-    // Authenticated routes.
-    e.GET("/dashboard", dashboardHandler,
-        porter.RequireAuth(idProvider),
-    )
-
-    // Role-protected routes.
-    admin := e.Group("/admin",
-        porter.RequireRole(idProvider, "admin"),
-    )
-    admin.GET("", adminHandler)
-
-    e.Logger.Fatal(e.Start(":8080"))
-}
-
-// CroonerIdentityMiddleware reads the user and roles from crooner's session
-// and sets a porter.Identity on the echo context.
-func CroonerIdentityMiddleware(sm crooner.SessionManager) echo.MiddlewareFunc {
-    return func(next echo.HandlerFunc) echo.HandlerFunc {
-        return func(c echo.Context) error {
-            user, err := crooner.GetString(sm, c, crooner.SessionKeyUser)
-            if err != nil || user == "" {
-                return next(c)
-            }
-            var roles []string
-            if val, err := sm.Get(c, "roles"); err == nil {
-                if r, ok := val.([]string); ok {
-                    roles = r
-                }
-            }
-            c.Set("porter.user_identity", porter.SimpleIdentity{
-                ID:       user,
-                RoleList: roles,
-            })
-            return next(c)
-        }
-    }
-}
-
-func homeHandler(c echo.Context) error      { return c.String(200, "home") }
-func dashboardHandler(c echo.Context) error  { return c.String(200, "dashboard") }
-func adminHandler(c echo.Context) error      { return c.String(200, "admin") }
-```
-
-## Without Crooner
+## Without crooner
 
 For apps that do not need external authentication, porter works standalone:
 
@@ -342,7 +265,7 @@ e.Use(porter.SessionSettingsMiddleware(repo, nil))
                │ identity on context
        ┌───────▼───────┐
        │   porter       │  "What can you do?"
-       │                │  CSRF · session settings · authorization
+       │                │  CSRF · session settings
        └───────┬───────┘
                │
        ┌───────▼───────┐
