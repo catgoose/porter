@@ -141,13 +141,41 @@ Optional configuration passed as a variadic argument to
 
 The `SessionSettings` struct holds the persisted preferences:
 
-| Field         | Type        | Description                       |
-|---------------|-------------|-----------------------------------|
-| `SessionUUID` | `string`    | The session identifier.           |
-| `Theme`       | `string`    | UI theme (default `"light"`).     |
-| `Layout`      | `string`    | UI layout (default `"classic"`).  |
-| `UpdatedAt`   | `time.Time` | Last update timestamp.            |
-| `ID`          | `int`       | Database row ID.                  |
+| Field         | Type                | Description                                  |
+|---------------|---------------------|----------------------------------------------|
+| `SessionUUID` | `string`            | The session identifier.                      |
+| `Theme`       | `string`            | UI theme (default `"light"`).                |
+| `Layout`      | `string`            | UI layout (default `"classic"`).             |
+| `Extra`       | `map[string]string` | App-specific preferences (serializes to JSON). |
+| `UpdatedAt`   | `time.Time`         | Last update timestamp.                       |
+| `ID`          | `int`               | Database row ID.                             |
+
+### App-specific preferences (Extra)
+
+The `Extra` field stores arbitrary key-value pairs for app-specific preferences
+that don't warrant dedicated struct fields. Use the helper methods for safe
+access:
+
+```go
+settings := porter.GetSessionSettings(r)
+
+// Read a preference (returns "" if not set).
+pageSize := settings.GetExtra("default_page_size")
+
+// Write a preference (initializes the map if nil).
+settings.SetExtra("sidebar_collapsed", "true")
+settings.SetExtra("default_page_size", "25")
+```
+
+When persisting to a database, serialize Extra to a JSON text column:
+
+```go
+// Store
+jsonStr, err := settings.MarshalExtra()
+
+// Load
+err := settings.UnmarshalExtra(jsonStr)
+```
 
 ### SessionSettingsProvider interface
 
