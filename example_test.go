@@ -121,8 +121,45 @@ func ExampleNewDefaultSettings() {
 	fmt.Println(s.SessionUUID)
 	fmt.Println(s.Theme)
 	fmt.Println(s.Layout)
+	fmt.Println(len(s.Extra))
 	// Output:
 	// abc-123
 	// light
 	// classic
+	// 0
+}
+
+func ExampleSessionSettings_SetExtra() {
+	s := porter.NewDefaultSettings("abc-123")
+	s.SetExtra("sidebar_collapsed", "true")
+	s.SetExtra("default_page_size", "25")
+
+	fmt.Println(s.GetExtra("sidebar_collapsed"))
+	fmt.Println(s.GetExtra("default_page_size"))
+	fmt.Println(s.GetExtra("nonexistent"))
+	// Output:
+	// true
+	// 25
+	//
+}
+
+func ExampleSessionSettings_MarshalExtra() {
+	s := porter.NewDefaultSettings("abc-123")
+	s.SetExtra("lang", "en")
+
+	data, _ := s.MarshalExtra()
+	fmt.Println(data)
+	// Output:
+	// {"lang":"en"}
+}
+
+func ExampleSessionSettings_UnmarshalExtra() {
+	s := porter.NewDefaultSettings("abc-123")
+	_ = s.UnmarshalExtra(`{"lang":"fr","tz":"UTC"}`)
+
+	fmt.Println(s.GetExtra("lang"))
+	fmt.Println(s.GetExtra("tz"))
+	// Output:
+	// fr
+	// UTC
 }
