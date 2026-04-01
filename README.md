@@ -345,6 +345,30 @@ Porter is the warm, comfortable, widely-practiced violation. But at least it's a
        +---------------+
 ```
 
+### Where porter fits in the dothog ecosystem
+
+```
+                        ┌──────────────────────────────────────┐
+                        │              dothog app              │
+                        └──────────┬───────────────────────────┘
+                                   │
+          ┌────────────┬───────────┼───────────┬────────────┐
+          │            │           │           │            │
+     ┌────v────┐  ┌────v────┐ ┌───v───┐  ┌───v────┐  ┌────v────┐
+     │ crooner │  │ *porter*│ │fraggle│  │ tavern │  │promolog │
+     │  auth   │  │  authz  │ │  sql  │  │  sse   │  │  logs   │
+     └────┬────┘  └─────────┘ └───────┘  └────────┘  └─────────┘
+          │
+          │ identity on ctx
+          v
+       porter reads it
+```
+
+Porter sits in the middleware chain between authentication (crooner) and your
+handlers. Crooner answers "who are you?", porter answers "are you allowed?"
+and "what are your preferences?" Neither library depends on the other — porter
+works standalone with any `IdentityProvider` implementation.
+
 ## License
 
 MIT
