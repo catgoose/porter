@@ -104,6 +104,12 @@ type IdentityProvider interface {
 
 ### RequireAuth
 
+> THE FOOL asked: "What is out-of-band information?" Out-of-band information is THE CONSPIRACY. It is the hidden knowledge. The secret handshake. The unspoken assumption.
+>
+> -- The Wisdom of the Uniform Interface
+
+Authentication is the one out-of-band assumption worth keeping. Porter makes it explicit: identity on the context, roles checked in middleware, no secret handshakes.
+
 Rejects unauthenticated requests with 401. The identity is stored on the
 request context for downstream handlers:
 
@@ -306,6 +312,16 @@ auth := porter.RequireAuth(provider)
 
 handler := auth(session(mux))
 ```
+
+## Philosophy
+
+Porter follows the [dothog design philosophy](https://github.com/catgoose/dothog/blob/main/PHILOSOPHY.md): standard `func(http.Handler) http.Handler` middleware, interface-driven storage, and the server handles who you are so the handler can focus on what you want.
+
+> Each request from client to server must contain ALL of the information necessary to understand the request. The server does not remember you. The server does not pine for you between requests.
+>
+> -- The Wisdom of the Uniform Interface
+
+Porter is the warm, comfortable, widely-practiced violation. But at least it's an *explicit* violation — every session setting is typed, stored, and accessible through a clean interface.
 
 ## Architecture
 
