@@ -37,7 +37,7 @@ func ExampleSessionSettingsMiddleware() {
 	handler := porter.SessionSettingsMiddleware(repo, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s := porter.GetSessionSettings(r)
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, "theme=%s layout=%s", s.Theme, s.Layout)
+		_, _ = fmt.Fprintf(w, "theme=%s layout=%s", s.Theme, s.Layout)
 	}))
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -60,7 +60,7 @@ func ExampleSessionSettingsMiddleware_customConfig() {
 	handler := porter.SessionSettingsMiddleware(repo, nil, cfg)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s := porter.GetSessionSettings(r)
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, "theme=%s", s.Theme)
+		_, _ = fmt.Fprintf(w, "theme=%s", s.Theme)
 	}))
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -84,7 +84,7 @@ func ExampleSessionSettingsMiddleware_withIDFunc() {
 	handler := porter.SessionSettingsMiddleware(repo, idFunc)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s := porter.GetSessionSettings(r)
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, "uuid=%s theme=%s", s.SessionUUID, s.Theme)
+		_, _ = fmt.Fprintf(w, "uuid=%s theme=%s", s.SessionUUID, s.Theme)
 	}))
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -104,7 +104,7 @@ func ExampleGetSessionSettings() {
 	handler := porter.SessionSettingsMiddleware(repo, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s := porter.GetSessionSettings(r)
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(s.Theme))
+		_, _ = w.Write([]byte(s.Theme))
 	}))
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
