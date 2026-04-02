@@ -5,10 +5,10 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"strings"
 )
 
 // Sentinel errors returned by CSRF middleware.
@@ -20,6 +20,13 @@ var (
 type csrfTokenKeyType struct{}
 
 var csrfTokenCtxKey csrfTokenKeyType
+
+// csrfMasker is stored on the context; it holds the raw HMAC bytes and the
+// maskToken function so that GetToken can apply a fresh pad on every call.
+type csrfMasker struct {
+	tokenBytes []byte
+	mask       func([]byte) (string, error)
+}
 
 // CSRFConfig configures the CSRF protection middleware.
 type CSRFConfig struct {
@@ -49,6 +56,12 @@ type CSRFConfig struct {
 	RotatePerRequest bool
 	// PerRequestPaths lists paths that rotate the nonce even when RotatePerRequest is false.
 	PerRequestPaths []string
+	// ValidateOrigin enables Origin header checking on unsafe methods.
+	// When true, rejects requests where Origin doesn't match the request host.
+	ValidateOrigin bool
+	// TrustedOrigins is a list of allowed origins (e.g. "https://example.com").
+	// Only used when ValidateOrigin is true. The request's own host is always trusted.
+	TrustedOrigins []string
 }
 
 // safeMethods are HTTP methods that do not mutate state and therefore skip
@@ -103,6 +116,12 @@ func CSRFProtect(cfg CSRFConfig) func(http.Handler) http.Handler {
 		perRequestSet[p] = true
 	}
 
+	// Build trusted origins set for fast lookup.
+	trustedOriginSet := make(map[string]bool, len(cfg.TrustedOrigins))
+	for _, o := range cfg.TrustedOrigins {
+		trustedOriginSet[strings.ToLower(strings.TrimRight(o, "/"))] = true
+	}
+
 	generateNonce := func() (string, error) {
 		b := make([]byte, 32)
 		if _, err := rand.Read(b); err != nil {
@@ -111,10 +130,54 @@ func CSRFProtect(cfg CSRFConfig) func(http.Handler) http.Handler {
 		return hex.EncodeToString(b), nil
 	}
 
-	computeToken := func(nonce string) string {
+	// computeHMAC returns the raw HMAC-SHA256 bytes for the given nonce.
+	computeHMAC := func(nonce string) []byte {
 		mac := hmac.New(sha256.New, cfg.Key)
 		mac.Write([]byte(nonce))
-		return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+		return mac.Sum(nil)
+	}
+
+	// maskToken applies a random one-time pad to the HMAC bytes and returns
+	// hex(pad) + hex(pad XOR token). This prevents BREACH attacks by ensuring
+	// that the visible token is different on every call even for the same nonce.
+	maskToken := func(tokenBytes []byte) (string, error) {
+		pad := make([]byte, len(tokenBytes))
+		if _, err := rand.Read(pad); err != nil {
+			return "", err
+		}
+		masked := make([]byte, len(tokenBytes))
+		for i := range tokenBytes {
+			masked[i] = pad[i] ^ tokenBytes[i]
+		}
+		return hex.EncodeToString(pad) + hex.EncodeToString(masked), nil
+	}
+
+	// unmaskToken recovers the original HMAC bytes from a masked token string.
+	// Returns nil if the token is malformed.
+	unmaskToken := func(s string) []byte {
+		// Each half is hex-encoded SHA-256 output (32 bytes = 64 hex chars).
+		if len(s) == 0 || len(s)%2 != 0 {
+			return nil
+		}
+		half := len(s) / 2
+		padHex := s[:half]
+		maskedHex := s[half:]
+		pad, err := hex.DecodeString(padHex)
+		if err != nil {
+			return nil
+		}
+		masked, err := hex.DecodeString(maskedHex)
+		if err != nil {
+			return nil
+		}
+		if len(pad) != len(masked) {
+			return nil
+		}
+		token := make([]byte, len(pad))
+		for i := range pad {
+			token[i] = pad[i] ^ masked[i]
+		}
+		return token
 	}
 
 	fail := func(w http.ResponseWriter, r *http.Request) {
@@ -123,6 +186,55 @@ func CSRFProtect(cfg CSRFConfig) func(http.Handler) http.Handler {
 			return
 		}
 		http.Error(w, "", http.StatusForbidden)
+	}
+
+	// checkOrigin validates the Origin (or Referer) header against the request
+	// host and TrustedOrigins. Returns true if the origin is acceptable.
+	checkOrigin := func(r *http.Request) bool {
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			// Fall back to Referer.
+			ref := r.Header.Get("Referer")
+			if ref == "" {
+				// No origin information — allow (some browsers omit both headers).
+				return true
+			}
+			// Strip path from referer to get origin-like prefix.
+			// We only need scheme+host for comparison.
+			if idx := strings.Index(ref, "://"); idx != -1 {
+				// Find end of host (first slash after scheme://).
+				rest := ref[idx+3:]
+				if slashIdx := strings.Index(rest, "/"); slashIdx != -1 {
+					origin = ref[:idx+3+slashIdx]
+				} else {
+					origin = ref
+				}
+			} else {
+				origin = ref
+			}
+		}
+
+		origin = strings.ToLower(strings.TrimRight(origin, "/"))
+
+		// Always trust the request's own host.
+		requestHost := strings.ToLower(r.Host)
+		// Build scheme+host from request for comparison.
+		for _, scheme := range []string{"https://", "http://"} {
+			if origin == scheme+requestHost {
+				return true
+			}
+		}
+		// Also accept bare host match (e.g. when origin header is just host).
+		if origin == requestHost {
+			return true
+		}
+
+		// Check trusted origins list.
+		if trustedOriginSet[origin] {
+			return true
+		}
+
+		return false
 	}
 
 	return func(next http.Handler) http.Handler {
@@ -170,6 +282,12 @@ func CSRFProtect(cfg CSRFConfig) func(http.Handler) http.Handler {
 					}
 				}
 			} else {
+				// Unsafe method: validate Origin header if configured.
+				if cfg.ValidateOrigin && !checkOrigin(r) {
+					fail(w, r)
+					return
+				}
+
 				// Unsafe method: must have existing cookie nonce.
 				c, err := r.Cookie(cfg.CookieName)
 				if err != nil || c.Value == "" {
@@ -190,9 +308,16 @@ func CSRFProtect(cfg CSRFConfig) func(http.Handler) http.Handler {
 					return
 				}
 
-				// Validate: recompute HMAC from cookie nonce and compare.
-				expected := computeToken(nonce)
-				if !hmac.Equal([]byte(submitted), []byte(expected)) {
+				// Unmask the submitted token to recover the real HMAC bytes.
+				recoveredBytes := unmaskToken(submitted)
+				if recoveredBytes == nil {
+					fail(w, r)
+					return
+				}
+
+				// Recompute expected HMAC and compare.
+				expected := computeHMAC(nonce)
+				if !hmac.Equal(recoveredBytes, expected) {
 					fail(w, r)
 					return
 				}
@@ -219,9 +344,13 @@ func CSRFProtect(cfg CSRFConfig) func(http.Handler) http.Handler {
 				SameSite: cfg.SameSite,
 			})
 
-			// Compute token and store on context.
-			token := computeToken(nonce)
-			r = r.WithContext(context.WithValue(r.Context(), csrfTokenCtxKey, token))
+			// Store the raw HMAC bytes and masking function on the context.
+			// GetToken applies a fresh one-time pad on every call (BREACH protection).
+			tokenBytes := computeHMAC(nonce)
+			r = r.WithContext(context.WithValue(r.Context(), csrfTokenCtxKey, &csrfMasker{
+				tokenBytes: tokenBytes,
+				mask:       maskToken,
+			}))
 
 			next.ServeHTTP(w, r)
 		})
@@ -230,7 +359,16 @@ func CSRFProtect(cfg CSRFConfig) func(http.Handler) http.Handler {
 
 // GetToken returns the CSRF token stored on the request context by
 // [CSRFProtect]. It returns an empty string when no token is present.
+// Each call applies a fresh one-time pad (BREACH protection), so the returned
+// string differs between calls even for the same underlying nonce.
 func GetToken(r *http.Request) string {
-	tok, _ := r.Context().Value(csrfTokenCtxKey).(string)
+	m, ok := r.Context().Value(csrfTokenCtxKey).(*csrfMasker)
+	if !ok || m == nil {
+		return ""
+	}
+	tok, err := m.mask(m.tokenBytes)
+	if err != nil {
+		return ""
+	}
 	return tok
 }

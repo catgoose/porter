@@ -324,6 +324,262 @@ func TestCustomFieldName_AndHeaderName(t *testing.T) {
 	require.Equal(t, http.StatusOK, postRec.Code)
 }
 
+// TestMaskedToken_DifferentEachCall verifies that two calls to GetToken for the
+// same request return different strings (different one-time pads).
+func TestMaskedToken_DifferentEachCall(t *testing.T) {
+	var token1, token2 string
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token1 = GetToken(r)
+		token2 = GetToken(r)
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := CSRFProtect(minimalCfg())(inner)
+
+	doRequest(t, handler, http.MethodGet, "/", nil)
+
+	require.NotEmpty(t, token1)
+	require.NotEmpty(t, token2)
+	// Same underlying HMAC but different pads — strings must differ.
+	require.NotEqual(t, token1, token2, "masked tokens should differ each call")
+}
+
+// TestMaskedToken_ValidatesViaHeader verifies that a masked token obtained from
+// GetToken is accepted when submitted via the CSRF header.
+func TestMaskedToken_ValidatesViaHeader(t *testing.T) {
+	var token string
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token = GetToken(r)
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := CSRFProtect(minimalCfg())(inner)
+
+	getRec := doRequest(t, handler, http.MethodGet, "/", nil)
+	require.Equal(t, http.StatusOK, getRec.Code)
+	nonceCookie := extractCookie(getRec, "_csrf")
+	require.NotNil(t, nonceCookie)
+
+	postRec := doRequest(t, handler, http.MethodPost, "/", func(r *http.Request) {
+		r.AddCookie(nonceCookie)
+		r.Header.Set("X-CSRF-Token", token)
+	})
+	require.Equal(t, http.StatusOK, postRec.Code)
+}
+
+// TestMaskedToken_ValidatesViaFormField verifies that a masked token is accepted
+// when submitted via a form field.
+func TestMaskedToken_ValidatesViaFormField(t *testing.T) {
+	var token string
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token = GetToken(r)
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := CSRFProtect(minimalCfg())(inner)
+
+	getRec := doRequest(t, handler, http.MethodGet, "/", nil)
+	nonceCookie := extractCookie(getRec, "_csrf")
+	require.NotNil(t, nonceCookie)
+
+	form := url.Values{"csrf_token": {token}}
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(nonceCookie)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+}
+
+// TestMaskedToken_CorruptedReturns403 verifies that a corrupted masked token is
+// rejected with 403.
+func TestMaskedToken_CorruptedReturns403(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := CSRFProtect(minimalCfg())(inner)
+
+	getRec := doRequest(t, handler, http.MethodGet, "/", nil)
+	nonceCookie := extractCookie(getRec, "_csrf")
+	require.NotNil(t, nonceCookie)
+
+	// Submit a hex-valid but semantically wrong masked token.
+	// 64 hex chars of zeros → pad=0x00…, masked=0x00…, recovered=all-zeros ≠ real HMAC.
+	corrupted := strings.Repeat("00", 64)
+	postRec := doRequest(t, handler, http.MethodPost, "/", func(r *http.Request) {
+		r.AddCookie(nonceCookie)
+		r.Header.Set("X-CSRF-Token", corrupted)
+	})
+	require.Equal(t, http.StatusForbidden, postRec.Code)
+}
+
+// TestOriginValidation_MatchingOriginSucceeds verifies that a request whose
+// Origin matches the request host passes CSRF validation.
+func TestOriginValidation_MatchingOriginSucceeds(t *testing.T) {
+	var token string
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token = GetToken(r)
+		w.WriteHeader(http.StatusOK)
+	})
+	cfg := minimalCfg()
+	cfg.ValidateOrigin = true
+	handler := CSRFProtect(cfg)(inner)
+
+	getRec := doRequest(t, handler, http.MethodGet, "/", nil)
+	nonceCookie := extractCookie(getRec, "_csrf")
+	require.NotNil(t, nonceCookie)
+
+	postRec := doRequest(t, handler, http.MethodPost, "/", func(r *http.Request) {
+		r.Host = "example.com"
+		r.Header.Set("Origin", "https://example.com")
+		r.AddCookie(nonceCookie)
+		r.Header.Set("X-CSRF-Token", token)
+	})
+	require.Equal(t, http.StatusOK, postRec.Code)
+}
+
+// TestOriginValidation_MismatchedOriginReturns403 verifies that a request whose
+// Origin does not match the request host is rejected.
+func TestOriginValidation_MismatchedOriginReturns403(t *testing.T) {
+	var token string
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token = GetToken(r)
+		w.WriteHeader(http.StatusOK)
+	})
+	cfg := minimalCfg()
+	cfg.ValidateOrigin = true
+	handler := CSRFProtect(cfg)(inner)
+
+	getRec := doRequest(t, handler, http.MethodGet, "/", nil)
+	nonceCookie := extractCookie(getRec, "_csrf")
+	require.NotNil(t, nonceCookie)
+
+	postRec := doRequest(t, handler, http.MethodPost, "/", func(r *http.Request) {
+		r.Host = "example.com"
+		r.Header.Set("Origin", "https://evil.com")
+		r.AddCookie(nonceCookie)
+		r.Header.Set("X-CSRF-Token", token)
+	})
+	require.Equal(t, http.StatusForbidden, postRec.Code)
+}
+
+// TestOriginValidation_TrustedOriginsList verifies that origins in TrustedOrigins
+// are accepted even when they differ from the request host.
+func TestOriginValidation_TrustedOriginsList(t *testing.T) {
+	var token string
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token = GetToken(r)
+		w.WriteHeader(http.StatusOK)
+	})
+	cfg := minimalCfg()
+	cfg.ValidateOrigin = true
+	cfg.TrustedOrigins = []string{"https://trusted.example.com"}
+	handler := CSRFProtect(cfg)(inner)
+
+	getRec := doRequest(t, handler, http.MethodGet, "/", nil)
+	nonceCookie := extractCookie(getRec, "_csrf")
+	require.NotNil(t, nonceCookie)
+
+	// Trusted origin should succeed.
+	postRec := doRequest(t, handler, http.MethodPost, "/", func(r *http.Request) {
+		r.Host = "example.com"
+		r.Header.Set("Origin", "https://trusted.example.com")
+		r.AddCookie(nonceCookie)
+		r.Header.Set("X-CSRF-Token", token)
+	})
+	require.Equal(t, http.StatusOK, postRec.Code)
+
+	// Untrusted origin should fail.
+	postRec2 := doRequest(t, handler, http.MethodPost, "/", func(r *http.Request) {
+		r.Host = "example.com"
+		r.Header.Set("Origin", "https://other.example.com")
+		r.AddCookie(nonceCookie)
+		r.Header.Set("X-CSRF-Token", token)
+	})
+	require.Equal(t, http.StatusForbidden, postRec2.Code)
+}
+
+// TestOriginValidation_MissingOriginAllowed verifies that requests without
+// Origin or Referer headers are allowed (some browsers omit them).
+func TestOriginValidation_MissingOriginAllowed(t *testing.T) {
+	var token string
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token = GetToken(r)
+		w.WriteHeader(http.StatusOK)
+	})
+	cfg := minimalCfg()
+	cfg.ValidateOrigin = true
+	handler := CSRFProtect(cfg)(inner)
+
+	getRec := doRequest(t, handler, http.MethodGet, "/", nil)
+	nonceCookie := extractCookie(getRec, "_csrf")
+	require.NotNil(t, nonceCookie)
+
+	// No Origin or Referer header — should be allowed.
+	postRec := doRequest(t, handler, http.MethodPost, "/", func(r *http.Request) {
+		r.AddCookie(nonceCookie)
+		r.Header.Set("X-CSRF-Token", token)
+	})
+	require.Equal(t, http.StatusOK, postRec.Code)
+}
+
+// TestOriginValidation_DisabledByDefault verifies that origin validation is off
+// by default, so a mismatched Origin does not cause a failure.
+func TestOriginValidation_DisabledByDefault(t *testing.T) {
+	var token string
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token = GetToken(r)
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := CSRFProtect(minimalCfg())(inner)
+
+	getRec := doRequest(t, handler, http.MethodGet, "/", nil)
+	nonceCookie := extractCookie(getRec, "_csrf")
+	require.NotNil(t, nonceCookie)
+
+	// Mismatched origin with ValidateOrigin=false (default) — should still pass.
+	postRec := doRequest(t, handler, http.MethodPost, "/", func(r *http.Request) {
+		r.Host = "example.com"
+		r.Header.Set("Origin", "https://evil.com")
+		r.AddCookie(nonceCookie)
+		r.Header.Set("X-CSRF-Token", token)
+	})
+	require.Equal(t, http.StatusOK, postRec.Code)
+}
+
+// TestOriginValidation_RefererFallback verifies that when Origin is absent,
+// the Referer header is used for origin validation.
+func TestOriginValidation_RefererFallback(t *testing.T) {
+	var token string
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token = GetToken(r)
+		w.WriteHeader(http.StatusOK)
+	})
+	cfg := minimalCfg()
+	cfg.ValidateOrigin = true
+	handler := CSRFProtect(cfg)(inner)
+
+	getRec := doRequest(t, handler, http.MethodGet, "/", nil)
+	nonceCookie := extractCookie(getRec, "_csrf")
+	require.NotNil(t, nonceCookie)
+
+	// Matching Referer (no Origin header) should pass.
+	postRec := doRequest(t, handler, http.MethodPost, "/", func(r *http.Request) {
+		r.Host = "example.com"
+		r.Header.Set("Referer", "https://example.com/page")
+		r.AddCookie(nonceCookie)
+		r.Header.Set("X-CSRF-Token", token)
+	})
+	require.Equal(t, http.StatusOK, postRec.Code)
+
+	// Mismatched Referer should fail.
+	postRec2 := doRequest(t, handler, http.MethodPost, "/", func(r *http.Request) {
+		r.Host = "example.com"
+		r.Header.Set("Referer", "https://evil.com/page")
+		r.AddCookie(nonceCookie)
+		r.Header.Set("X-CSRF-Token", token)
+	})
+	require.Equal(t, http.StatusForbidden, postRec2.Code)
+}
+
 // TestPOST_WithValidToken_AfterRotatePerRequest verifies that after rotation
 // the old token is no longer valid.
 func TestPOST_WithValidToken_AfterRotatePerRequest(t *testing.T) {
