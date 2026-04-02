@@ -580,6 +580,146 @@ func TestOriginValidation_RefererFallback(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, postRec2.Code)
 }
 
+// TestUnmaskToken_OddLengthReturns403 verifies that a submitted token with an
+// odd number of characters is rejected (unmaskToken returns nil for odd-length).
+func TestUnmaskToken_OddLengthReturns403(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := CSRFProtect(minimalCfg())(inner)
+
+	getRec := doRequest(t, handler, http.MethodGet, "/", nil)
+	nonceCookie := extractCookie(getRec, "_csrf")
+	require.NotNil(t, nonceCookie)
+
+	// Odd-length string → unmaskToken returns nil.
+	postRec := doRequest(t, handler, http.MethodPost, "/", func(r *http.Request) {
+		r.AddCookie(nonceCookie)
+		r.Header.Set("X-CSRF-Token", "abc") // odd length
+	})
+	require.Equal(t, http.StatusForbidden, postRec.Code)
+}
+
+// TestUnmaskToken_InvalidHexPadReturns403 verifies that a submitted token
+// whose first half is not valid hex is rejected.
+func TestUnmaskToken_InvalidHexPadReturns403(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := CSRFProtect(minimalCfg())(inner)
+
+	getRec := doRequest(t, handler, http.MethodGet, "/", nil)
+	nonceCookie := extractCookie(getRec, "_csrf")
+	require.NotNil(t, nonceCookie)
+
+	// 8 chars total, even length. First half "zzzz" is not valid hex.
+	postRec := doRequest(t, handler, http.MethodPost, "/", func(r *http.Request) {
+		r.AddCookie(nonceCookie)
+		r.Header.Set("X-CSRF-Token", "zzzz1234")
+	})
+	require.Equal(t, http.StatusForbidden, postRec.Code)
+}
+
+// TestUnmaskToken_InvalidHexMaskedReturns403 verifies that a submitted token
+// whose second half is not valid hex is rejected.
+func TestUnmaskToken_InvalidHexMaskedReturns403(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := CSRFProtect(minimalCfg())(inner)
+
+	getRec := doRequest(t, handler, http.MethodGet, "/", nil)
+	nonceCookie := extractCookie(getRec, "_csrf")
+	require.NotNil(t, nonceCookie)
+
+	// 8 chars total, even length. First half "1234" is valid hex; second "zzzz" is not.
+	postRec := doRequest(t, handler, http.MethodPost, "/", func(r *http.Request) {
+		r.AddCookie(nonceCookie)
+		r.Header.Set("X-CSRF-Token", "1234zzzz")
+	})
+	require.Equal(t, http.StatusForbidden, postRec.Code)
+}
+
+// TestOriginValidation_RefererNoScheme verifies that a Referer without "://"
+// is used as-is for comparison, and a mismatch returns 403.
+func TestOriginValidation_RefererNoScheme(t *testing.T) {
+	var token string
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token = GetToken(r)
+		w.WriteHeader(http.StatusOK)
+	})
+	cfg := minimalCfg()
+	cfg.ValidateOrigin = true
+	handler := CSRFProtect(cfg)(inner)
+
+	getRec := doRequest(t, handler, http.MethodGet, "/", nil)
+	nonceCookie := extractCookie(getRec, "_csrf")
+	require.NotNil(t, nonceCookie)
+
+	// Referer without "://" is treated as the raw value; it won't match the host.
+	postRec := doRequest(t, handler, http.MethodPost, "/", func(r *http.Request) {
+		r.Host = "example.com"
+		r.Header.Set("Referer", "example.com/page") // no scheme
+		r.AddCookie(nonceCookie)
+		r.Header.Set("X-CSRF-Token", token)
+	})
+	// "example.com/page" trimmed of trailing "/" → "example.com/page".
+	// It won't match "https://example.com" or "http://example.com".
+	// But it also won't match bare "example.com". So 403.
+	require.Equal(t, http.StatusForbidden, postRec.Code)
+}
+
+// TestOriginValidation_RefererNoSlashAfterHost verifies the branch where a
+// Referer has a scheme ("://") but no slash after the host portion.
+func TestOriginValidation_RefererNoSlashAfterHost(t *testing.T) {
+	var token string
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token = GetToken(r)
+		w.WriteHeader(http.StatusOK)
+	})
+	cfg := minimalCfg()
+	cfg.ValidateOrigin = true
+	handler := CSRFProtect(cfg)(inner)
+
+	getRec := doRequest(t, handler, http.MethodGet, "/", nil)
+	nonceCookie := extractCookie(getRec, "_csrf")
+	require.NotNil(t, nonceCookie)
+
+	// Referer with scheme but no path slash — entire ref is used as the origin.
+	postRec := doRequest(t, handler, http.MethodPost, "/", func(r *http.Request) {
+		r.Host = "example.com"
+		r.Header.Set("Referer", "https://example.com") // no trailing slash or path
+		r.AddCookie(nonceCookie)
+		r.Header.Set("X-CSRF-Token", token)
+	})
+	require.Equal(t, http.StatusOK, postRec.Code)
+}
+
+// TestOriginValidation_BareHostMatch verifies that an Origin header containing
+// just the bare hostname (no scheme) is accepted when it matches the request host.
+func TestOriginValidation_BareHostMatch(t *testing.T) {
+	var token string
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token = GetToken(r)
+		w.WriteHeader(http.StatusOK)
+	})
+	cfg := minimalCfg()
+	cfg.ValidateOrigin = true
+	handler := CSRFProtect(cfg)(inner)
+
+	getRec := doRequest(t, handler, http.MethodGet, "/", nil)
+	nonceCookie := extractCookie(getRec, "_csrf")
+	require.NotNil(t, nonceCookie)
+
+	postRec := doRequest(t, handler, http.MethodPost, "/", func(r *http.Request) {
+		r.Host = "example.com"
+		r.Header.Set("Origin", "example.com") // bare host, no scheme
+		r.AddCookie(nonceCookie)
+		r.Header.Set("X-CSRF-Token", token)
+	})
+	require.Equal(t, http.StatusOK, postRec.Code)
+}
+
 // TestPOST_WithValidToken_AfterRotatePerRequest verifies that after rotation
 // the old token is no longer valid.
 func TestPOST_WithValidToken_AfterRotatePerRequest(t *testing.T) {

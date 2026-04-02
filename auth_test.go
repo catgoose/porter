@@ -184,6 +184,26 @@ func TestContextIdentityProvider(t *testing.T) {
 	})
 }
 
+// TestRequireAnyRole_NilIdentityNoError covers the branch where the provider
+// returns nil identity with no error, which should result in 401.
+func TestRequireAnyRole_NilIdentityNoError(t *testing.T) {
+	provider := &staticProvider{identity: nil, err: nil}
+	mw := RequireAnyRole(provider, "admin")
+
+	var called bool
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.False(t, called)
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
 // Compile-time interface checks.
 var (
 	_ Identity         = SimpleIdentity{}
