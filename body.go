@@ -43,7 +43,7 @@ func (m *maxBodyWriter) WriteHeader(code int) {
 
 func (m *maxBodyWriter) Write(b []byte) (int, error) {
 	if m.intercepted {
-		return io.Discard.(io.Writer).Write(b)
+		return io.Discard.Write(b)
 	}
 	return m.ResponseWriter.Write(b)
 }
