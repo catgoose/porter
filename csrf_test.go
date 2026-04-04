@@ -745,3 +745,93 @@ func TestPOST_WithValidToken_AfterRotatePerRequest(t *testing.T) {
 	})
 	require.Equal(t, http.StatusOK, postRec.Code)
 }
+
+// TestSecFetch_SameOrigin_SkipsTokenValidation verifies that a POST with
+// Sec-Fetch-Site: same-origin succeeds without a CSRF token.
+func TestSecFetch_SameOrigin_SkipsTokenValidation(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := CSRFProtect(minimalCfg())(inner)
+
+	rec := doRequest(t, handler, http.MethodPost, "/", func(r *http.Request) {
+		r.Header.Set("Sec-Fetch-Site", "same-origin")
+	})
+	require.Equal(t, http.StatusOK, rec.Code)
+}
+
+// TestSecFetch_CrossSite_StillRequiresToken verifies that Sec-Fetch-Site:
+// cross-site does NOT bypass token validation.
+func TestSecFetch_CrossSite_StillRequiresToken(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := CSRFProtect(minimalCfg())(inner)
+
+	rec := doRequest(t, handler, http.MethodPost, "/", func(r *http.Request) {
+		r.Header.Set("Sec-Fetch-Site", "cross-site")
+	})
+	require.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+// TestSecFetch_SameSite_StillRequiresToken verifies that Sec-Fetch-Site:
+// same-site does NOT bypass token validation.
+func TestSecFetch_SameSite_StillRequiresToken(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := CSRFProtect(minimalCfg())(inner)
+
+	rec := doRequest(t, handler, http.MethodPost, "/", func(r *http.Request) {
+		r.Header.Set("Sec-Fetch-Site", "same-site")
+	})
+	require.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+// TestSecFetch_None_StillRequiresToken verifies that Sec-Fetch-Site: none
+// does NOT bypass token validation.
+func TestSecFetch_None_StillRequiresToken(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := CSRFProtect(minimalCfg())(inner)
+
+	rec := doRequest(t, handler, http.MethodPost, "/", func(r *http.Request) {
+		r.Header.Set("Sec-Fetch-Site", "none")
+	})
+	require.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+// TestSecFetch_Absent_StillRequiresToken verifies that a POST without any
+// Sec-Fetch-Site header still requires a valid CSRF token.
+func TestSecFetch_Absent_StillRequiresToken(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := CSRFProtect(minimalCfg())(inner)
+
+	rec := doRequest(t, handler, http.MethodPost, "/", nil)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+// TestSecFetch_SameOrigin_SetsCookieAndContext verifies that the fast path
+// still sets the CSRF cookie and makes GetToken() work.
+func TestSecFetch_SameOrigin_SetsCookieAndContext(t *testing.T) {
+	var contextToken string
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		contextToken = GetToken(r)
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := CSRFProtect(minimalCfg())(inner)
+
+	rec := doRequest(t, handler, http.MethodPost, "/", func(r *http.Request) {
+		r.Header.Set("Sec-Fetch-Site", "same-origin")
+	})
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NotEmpty(t, contextToken, "GetToken should return a token on same-origin fast path")
+
+	cookie := extractCookie(rec, "_csrf")
+	require.NotNil(t, cookie, "CSRF cookie should be set on same-origin fast path")
+	require.NotEmpty(t, cookie.Value)
+}
