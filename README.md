@@ -36,8 +36,9 @@
 > -- The Wisdom of the Uniform Interface
 
 Post-authentication security middleware for Go `net/http` applications. Porter
-guards the door -- role enforcement, CSRF verification, request limits, and
-response hardening in standard `func(http.Handler) http.Handler` middleware.
+guards the door -- role enforcement, CSRF verification, rate limiting, request
+limits, and response hardening in standard `func(http.Handler) http.Handler`
+middleware.
 Porter doesn't handle authentication (see [crooner](https://github.com/catgoose/crooner)
 for that) -- it assumes an identity already exists and enforces security on top
 of it.
@@ -342,6 +343,108 @@ limit := porter.MaxRequestBody(porter.MaxBodyConfig{
 })
 ```
 
+## Rate Limiting
+
+> grug brain no want million request per second.
+>
+> -- Layman Grug
+
+Fixed-window rate limiting with per-path overrides, custom key functions, and
+exemptions. No external dependencies -- pure stdlib.
+
+```go
+limiter := porter.RateLimit(porter.RateLimitConfig{
+    Requests: 100,
+    Window:   time.Minute,
+})
+handler := limiter(mux)
+```
+
+### Per-path overrides
+
+Stricter limits for sensitive endpoints:
+
+```go
+limiter := porter.RateLimit(porter.RateLimitConfig{
+    Requests: 100,
+    Window:   time.Minute,
+    PerPath: map[string]porter.RateRule{
+        "/login": {Requests: 5, Window: time.Minute},
+        "/api/expensive": {Requests: 10, Window: time.Minute},
+    },
+})
+```
+
+### Custom key function
+
+Rate limit by something other than IP:
+
+```go
+limiter := porter.RateLimit(porter.RateLimitConfig{
+    Requests: 100,
+    Window:   time.Minute,
+    KeyFunc: func(r *http.Request) string {
+        return r.Header.Get("X-API-Key")
+    },
+})
+```
+
+### Rate limit configuration
+
+```go
+porter.RateLimit(porter.RateLimitConfig{
+    Requests:    100,                   // max requests per window (required)
+    Window:      time.Minute,           // window duration (required)
+    KeyFunc:     porter.IPKey,          // key extractor (default: IPKey)
+    PerPath:     map[string]porter.RateRule{"/login": {Requests: 5, Window: time.Minute}},
+    ExemptPaths: []string{"/health"},
+    ExemptFunc:  func(r *http.Request) bool { return r.Header.Get("X-API-Key") != "" },
+    ErrorHandler: func(w http.ResponseWriter, r *http.Request) { ... },
+})
+```
+
+## Brute Force Protection
+
+Tracks failed response status codes and blocks a key after too many failures.
+Designed for login and authentication endpoints where repeated 401 responses
+indicate a brute-force attack.
+
+```go
+brute := porter.BruteForceProtect(porter.BruteForceConfig{
+    MaxAttempts: 5,
+    Cooldown:    15 * time.Minute,
+})
+handler := brute(mux)
+```
+
+### Resetting on success
+
+Call `ResetFailures` on successful authentication so legitimate users don't get
+locked out after a few typos:
+
+```go
+mux.HandleFunc("POST /login", func(w http.ResponseWriter, r *http.Request) {
+    if authenticate(r) {
+        porter.ResetFailures(r)
+        w.WriteHeader(http.StatusOK)
+        return
+    }
+    w.WriteHeader(http.StatusUnauthorized)
+})
+```
+
+### Brute force configuration
+
+```go
+porter.BruteForceProtect(porter.BruteForceConfig{
+    MaxAttempts:   5,                    // failures before blocking (required)
+    Cooldown:      15 * time.Minute,     // block duration (required)
+    KeyFunc:       porter.IPKey,         // key extractor (default: IPKey)
+    FailureStatus: []int{401},           // status codes that count as failures (default: [401])
+    ErrorHandler:  func(w http.ResponseWriter, r *http.Request) { ... },
+})
+```
+
 ## Middleware Chain
 
 Composing middleware with nested calls works for two or three layers but
@@ -408,6 +511,11 @@ Porter tells the client three things: whether you're allowed in (authz), whether
   +---------v-------+
   |  CSRF Protect   |  validate token on unsafe methods
   |                 |  set cookie + context token
+  +---------+-------+
+            |
+  +---------v-------+
+  |   RateLimit     |  fixed-window rate limiting
+  | BruteForceProtect  track failures, block after threshold
   +---------+-------+
             |
   +---------v-------+
